@@ -8,10 +8,16 @@ from datetime import datetime
 
 app = FastAPI()
 
-# Allow CORS for local dev
+# Configuration CORS plus sécurisée
+origins = [
+    "https://vps-a6456265.vps.ovh.net",  # Production
+    "http://localhost:8001",              # Développement local
+    "http://127.0.0.1:8001"              # Développement local
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

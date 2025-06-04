@@ -2,7 +2,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
-from typing import List, Dict
+from typing import List, Dict, Set
 from collections import deque
 from datetime import datetime
 
@@ -30,36 +30,60 @@ app.add_middleware(
 
 class ConnectionManager:
     def __init__(self):
-        self.active_connections: List[WebSocket] = []
+        self.active_connections: Set[WebSocket] = set()
         self.pseudos: Dict[WebSocket, str] = {}
         self.message_history = deque(maxlen=100)  # Store last 100 messages
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
-        self.active_connections.append(websocket)
+        self.active_connections.add(websocket)
         # Send message history to new client
         if self.message_history:
-            await websocket.send_json({
-                "type": "history",
-                "messages": list(self.message_history)
-            })
+            try:
+                await websocket.send_json({
+                    "type": "history",
+                    "messages": list(self.message_history)
+                })
+            except RuntimeError:
+                # Connection might be closed already
+                await self.disconnect(websocket)
+                return
 
-    def disconnect(self, websocket: WebSocket):
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
-        if websocket in self.pseudos:
-            del self.pseudos[websocket]
+    async def disconnect(self, websocket: WebSocket):
+        self.active_connections.discard(websocket)
+        old_pseudo = self.pseudos.pop(websocket, None)
+        if old_pseudo:
+            # Broadcast disconnection only if we had a pseudo
+            remaining_connections = self.active_connections - {websocket}
+            if remaining_connections:
+                for conn in remaining_connections:
+                    try:
+                        await conn.send_json({
+                            "type": "system",
+                            "txt": f"{old_pseudo} has left the chat"
+                        })
+                    except RuntimeError:
+                        # Remove any connections that fail
+                        await self.disconnect(conn)
+            await self.broadcast_pseudos()
 
     async def receive_pseudo(self, websocket: WebSocket, pseudo: str):
+        if websocket not in self.active_connections:
+            return
+        
         old_pseudo = self.pseudos.get(websocket)
         self.pseudos[websocket] = pseudo
-        await self.broadcast_pseudos()
-        # Announce pseudo change if it's not a new connection
-        if old_pseudo and old_pseudo != pseudo:
-            await self.broadcast({
-                "type": "system",
-                "txt": f"{old_pseudo} is now known as {pseudo}"
-            })
+        
+        try:
+            await self.broadcast_pseudos()
+            # Announce pseudo change if it's not a new connection
+            if old_pseudo and old_pseudo != pseudo:
+                await self.broadcast({
+                    "type": "system",
+                    "txt": f"{old_pseudo} is now known as {pseudo}"
+                })
+        except RuntimeError:
+            await self.disconnect(websocket)
 
     async def broadcast(self, message: dict):
         # Store message in history if it's a chat message
@@ -68,8 +92,17 @@ class ConnectionManager:
                 **message,
                 "timestamp": datetime.now().isoformat()
             })
+        
+        failed_connections = set()
         for connection in self.active_connections:
-            await connection.send_json(message)
+            try:
+                await connection.send_json(message)
+            except RuntimeError:
+                failed_connections.add(connection)
+        
+        # Clean up failed connections
+        for failed in failed_connections:
+            await self.disconnect(failed)
 
     async def broadcast_pseudos(self):
         pseudos = list(self.pseudos.values())
@@ -81,7 +114,6 @@ manager = ConnectionManager()
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
-        pseudo_received = False
         while True:
             data = await websocket.receive_json()
             msg_type = data.get("type")
@@ -89,25 +121,19 @@ async def websocket_endpoint(websocket: WebSocket):
                 pseudo = data.get("txt")
                 if pseudo:
                     await manager.receive_pseudo(websocket, pseudo)
-                    pseudo_received = True
             elif msg_type == "message":
                 txt = data.get("txt")
                 pseudo = data.get("pseudo")
-                if txt and pseudo:
+                if txt and pseudo and websocket in manager.pseudos:
                     await manager.broadcast({
                         "type": "message",
                         "txt": txt,
                         "pseudo": pseudo
                     })
     except WebSocketDisconnect:
-        manager.disconnect(websocket)
-        if websocket in manager.pseudos:
-            old_pseudo = manager.pseudos[websocket]
-            await manager.broadcast({
-                "type": "system",
-                "txt": f"{old_pseudo} has left the chat"
-            })
-        await manager.broadcast_pseudos()
+        await manager.disconnect(websocket)
+    except RuntimeError:
+        await manager.disconnect(websocket)
 
 if __name__ == "__main__":
     uvicorn.run("index:app", host="0.0.0.0", port=8000, reload=True)

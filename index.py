@@ -10,14 +10,19 @@ app = FastAPI()
 
 # Configuration CORS plus sécurisée
 origins = [
-    "https://vps-a6456265.vps.ovh.net",  # Production
+    "https://vps-a6456265.vps.ovh.net",  # Production HTTPS
+    "http://vps-a6456265.vps.ovh.net",   # Production HTTP
+    "wss://vps-a6456265.vps.ovh.net",    # Production WSS
+    "ws://vps-a6456265.vps.ovh.net",     # Production WS
     "http://localhost:8001",              # Développement local
-    "http://127.0.0.1:8001"              # Développement local
+    "http://127.0.0.1:8001",             # Développement local
+    "http://localhost:8000",              # Backend local
+    "http://127.0.0.1:8000"              # Backend local
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],  # Temporairement permettre toutes les origines pour déboguer
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
